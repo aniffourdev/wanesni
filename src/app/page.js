@@ -15,7 +15,7 @@ export default function Login() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      router.push('/chat');
+      router.push('/video');
     }
   }, [isAuthenticated, router]);
 

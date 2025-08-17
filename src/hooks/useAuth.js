@@ -216,7 +216,7 @@ export function withAuth(Component) {
 
     useEffect(() => {
       if (!loading && !isAuthenticated) {
-        router.push('/');
+        router.push('/login'); // 👈 redirect to /login, not /
       }
     }, [isAuthenticated, loading, router]);
 
