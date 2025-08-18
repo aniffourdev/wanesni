@@ -20,17 +20,27 @@ export default function VideoPage() {
   const [socket, setSocket] = useState(null);
   const [activeCall, setActiveCall] = useState(null);
   const [incomingCall, setIncomingCall] = useState(null);
-  const [connectionStatus, setConnectionStatus] = useState('disconnected'); // 'disconnected', 'connecting', 'connected', 'error'
+  const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [retryCount, setRetryCount] = useState(0);
+  const [error, setError] = useState(null);
   
   const socketRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const initTimeoutRef = useRef(null);
 
+  // Check if HTTPS is required
+  useEffect(() => {
+    const isSecure = window.location.protocol === 'https:' || window.location.hostname === 'localhost';
+    if (!isSecure) {
+      setError('Video calls require HTTPS. Please use https://wanesni.com');
+      return;
+    }
+  }, []);
+
   // Initialize socket connection with better error handling
   useEffect(() => {
-    if (!user) {
-      console.log('❌ No user found, cannot connect socket');
+    if (!user || error) {
+      console.log('❌ Cannot connect socket - no user or error present');
       return;
     }
 
@@ -40,7 +50,7 @@ export default function VideoPage() {
     return () => {
       cleanup();
     };
-  }, [user]);
+  }, [user, error]);
 
   const connectSocket = () => {
     if (socketRef.current) {
@@ -58,6 +68,7 @@ export default function VideoPage() {
     }
 
     setConnectionStatus('connecting');
+    setError(null);
     console.log('🔄 Attempting socket connection...');
 
     try {
@@ -72,7 +83,7 @@ export default function VideoPage() {
         rememberUpgrade: true,
         timeout: 20000,
         forceNew: true,
-        reconnection: false // We'll handle reconnection manually
+        reconnection: false
       });
 
       socketRef.current = newSocket;
@@ -83,6 +94,7 @@ export default function VideoPage() {
         console.log('✅ Socket connected:', newSocket.id);
         setConnectionStatus('connected');
         setRetryCount(0);
+        setError(null);
         
         // Initialize user after connection
         console.log('👤 Initializing user...');
@@ -95,7 +107,7 @@ export default function VideoPage() {
 
         // Set a timeout to ensure initialization completes
         initTimeoutRef.current = setTimeout(() => {
-          console.log('⏰ Init timeout - broadcasting users request');
+          console.log('⏰ Init timeout - requesting users');
           newSocket.emit('requestOnlineUsers');
         }, 3000);
       });
@@ -104,6 +116,7 @@ export default function VideoPage() {
       newSocket.on('connect_error', (error) => {
         console.error('❌ Socket connection error:', error.message);
         setConnectionStatus('error');
+        setError(`Connection failed: ${error.message}`);
         
         // Retry with exponential backoff
         const nextRetryCount = retryCount + 1;
@@ -117,6 +130,7 @@ export default function VideoPage() {
           }, delay);
         } else {
           console.error('❌ Max reconnection attempts reached');
+          setError('Unable to connect to server. Please refresh and try again.');
         }
       });
 
@@ -136,13 +150,22 @@ export default function VideoPage() {
         }
       });
 
-      // Listen for online users
+      // Listen for online users with deduplication
       newSocket.on('onlineUsers', (usersList) => {
         console.log('👥 Received online users update:', usersList.length, 'users');
-        const filteredUsers = Array.isArray(usersList) 
-          ? usersList.filter(u => u && u.id && u.id !== user.id) 
-          : [];
-        setOnlineUsers(filteredUsers);
+        
+        if (Array.isArray(usersList)) {
+          // Remove duplicates and filter out current user
+          const uniqueUsers = usersList.filter((u, index, arr) => {
+            return u && u.id && u.id !== user.id && 
+                   arr.findIndex(other => other.id === u.id) === index; // Remove duplicates
+          });
+          
+          console.log('👥 After deduplication:', uniqueUsers.length, 'unique users');
+          setOnlineUsers(uniqueUsers);
+        } else {
+          setOnlineUsers([]);
+        }
         
         // Clear init timeout since we got the users list
         if (initTimeoutRef.current) {
@@ -198,16 +221,19 @@ export default function VideoPage() {
       newSocket.on('callFailed', (data) => {
         console.error('📞 Call failed:', data);
         alert(`Call failed: ${data.reason}`);
+        setIncomingCall(null);
       });
 
       // Listen for errors
       newSocket.on('error', (error) => {
         console.error('🚨 Socket error:', error);
+        setError(`Socket error: ${error.message || 'Unknown error'}`);
       });
 
     } catch (error) {
       console.error('❌ Failed to create socket:', error);
       setConnectionStatus('error');
+      setError(`Failed to create connection: ${error.message}`);
     }
   };
 
@@ -254,7 +280,7 @@ export default function VideoPage() {
     fetchUsers();
   }, [user, apiCall]);
 
-  // Call user function
+  // Call user function with better validation
   const callUser = (targetUser) => {
     if (!socket || connectionStatus !== 'connected' || !user) {
       alert('Connection not ready. Please wait a moment and try again.');
@@ -263,6 +289,11 @@ export default function VideoPage() {
 
     if (!targetUser || !targetUser.id) {
       alert('Invalid user selected.');
+      return;
+    }
+
+    if (targetUser.id === user.id) {
+      alert('You cannot call yourself.');
       return;
     }
 
@@ -281,16 +312,21 @@ export default function VideoPage() {
       targetUserId: targetUser.id
     });
 
-    socket.emit('callOffer', {
-      callId,
-      roomId,
-      callerId: user.id,
-      callerName: `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.id,
-      calleeId: targetUser.id,
-      callType: 'video'
-    });
+    try {
+      socket.emit('callOffer', {
+        callId,
+        roomId,
+        callerId: user.id,
+        callerName: `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.id,
+        calleeId: targetUser.id,
+        callType: 'video'
+      });
 
-    console.log(`📞 Calling ${targetUser.first_name || targetUser.id}...`);
+      console.log(`📞 Calling ${targetUser.first_name || targetUser.id}...`);
+    } catch (error) {
+      console.error('❌ Error initiating call:', error);
+      alert('Failed to start call. Please try again.');
+    }
   };
 
   // Accept call function
@@ -302,23 +338,29 @@ export default function VideoPage() {
 
     console.log('✅ Accepting call...', incomingCall);
 
-    socket.emit('callResponse', {
-      callId: incomingCall.callId,
-      response: 'accepted',
-      callerId: incomingCall.callerId
-    });
+    try {
+      socket.emit('callResponse', {
+        callId: incomingCall.callId,
+        response: 'accepted',
+        callerId: incomingCall.callerId,
+        roomId: incomingCall.roomId // Pass the roomId
+      });
 
-    setActiveCall({
-      roomId: incomingCall.roomId,
-      callId: incomingCall.callId,
-      isInitiator: false,
-      otherUser: {
-        id: incomingCall.callerId,
-        name: incomingCall.callerName,
-        avatar: incomingCall.callerAvatar
-      }
-    });
-    setIncomingCall(null);
+      setActiveCall({
+        roomId: incomingCall.roomId,
+        callId: incomingCall.callId,
+        isInitiator: false,
+        otherUser: {
+          id: incomingCall.callerId,
+          name: incomingCall.callerName,
+          avatar: incomingCall.callerAvatar
+        }
+      });
+      setIncomingCall(null);
+    } catch (error) {
+      console.error('❌ Error accepting call:', error);
+      alert('Failed to accept call.');
+    }
   };
 
   // Reject call function
@@ -330,28 +372,37 @@ export default function VideoPage() {
 
     console.log('❌ Rejecting call...', incomingCall);
 
-    socket.emit('callResponse', {
-      callId: incomingCall.callId,
-      response: 'rejected',
-      callerId: incomingCall.callerId
-    });
+    try {
+      socket.emit('callResponse', {
+        callId: incomingCall.callId,
+        response: 'rejected',
+        callerId: incomingCall.callerId
+      });
 
-    setIncomingCall(null);
+      setIncomingCall(null);
+    } catch (error) {
+      console.error('❌ Error rejecting call:', error);
+    }
   };
 
   // End call function
   const endCall = () => {
     if (!socket || !activeCall) {
       console.error('❌ Cannot end call - missing socket or active call data');
+      setActiveCall(null); // Clear the call state anyway
       return;
     }
 
     console.log('📴 Ending call...', activeCall);
 
-    socket.emit('callEnded', {
-      callId: activeCall.callId,
-      reason: 'ended_by_user'
-    });
+    try {
+      socket.emit('callEnded', {
+        callId: activeCall.callId,
+        reason: 'ended_by_user'
+      });
+    } catch (error) {
+      console.error('❌ Error ending call:', error);
+    }
 
     setActiveCall(null);
   };
@@ -359,6 +410,7 @@ export default function VideoPage() {
   // Retry connection manually
   const retryConnection = () => {
     setRetryCount(0);
+    setError(null);
     connectSocket();
   };
 
@@ -370,6 +422,25 @@ export default function VideoPage() {
           <div className="text-6xl mb-4">🔐</div>
           <h2 className="text-2xl font-bold mb-2">Authentication Required</h2>
           <p>Please log in to access video calls</p>
+        </div>
+      </div>
+    );
+  }
+
+  // HTTPS error
+  if (error && error.includes('HTTPS')) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-pink-800 to-purple-900 flex items-center justify-center">
+        <div className="text-center text-white max-w-md">
+          <div className="text-6xl mb-4">🔒</div>
+          <h2 className="text-2xl font-bold mb-2">HTTPS Required</h2>
+          <p className="mb-6">{error}</p>
+          <a 
+            href="https://wanesni.com/video"
+            className="bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-lg transition-colors font-semibold inline-block"
+          >
+            Go to Secure Site
+          </a>
         </div>
       </div>
     );
@@ -412,13 +483,13 @@ export default function VideoPage() {
   const connectionDisplay = getConnectionDisplay();
 
   // Show connection error with retry
-  if (connectionStatus === 'error' && retryCount >= 5) {
+  if (error && !error.includes('HTTPS')) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-900 via-pink-800 to-purple-900 flex items-center justify-center">
         <div className="text-center text-white max-w-md">
           <div className="text-6xl mb-4">🚫</div>
-          <h2 className="text-2xl font-bold mb-2">Connection Failed</h2>
-          <p className="mb-6">Unable to connect to the video call server. Please check your internet connection and try again.</p>
+          <h2 className="text-2xl font-bold mb-2">Connection Error</h2>
+          <p className="mb-6">{error}</p>
           <button 
             onClick={retryConnection}
             className="bg-purple-600 hover:bg-purple-700 px-6 py-3 rounded-lg transition-colors font-semibold"
@@ -471,7 +542,7 @@ export default function VideoPage() {
             <span className={`text-sm font-medium ${connectionDisplay.color}`}>
               {connectionDisplay.icon} {connectionDisplay.text}
             </span>
-            {connectionStatus !== 'connected' && retryCount < 5 && (
+            {connectionStatus !== 'connected' && retryCount < 5 && !error && (
               <button
                 onClick={retryConnection}
                 className="ml-3 text-xs bg-white bg-opacity-20 hover:bg-opacity-30 px-3 py-1 rounded-full transition-all"
@@ -548,7 +619,7 @@ export default function VideoPage() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {onlineUsers.map(userItem => (
                 <div
-                  key={userItem.id}
+                  key={`${userItem.id}-${userItem.connectedAt}`} // Better key to prevent duplicates
                   className="bg-white bg-opacity-20 backdrop-blur-sm rounded-2xl p-6 border border-white border-opacity-30 hover:bg-opacity-30 transition-all duration-300 transform hover:scale-105"
                 >
                   <div className="flex items-center justify-between">
@@ -557,10 +628,10 @@ export default function VideoPage() {
                         {(userItem.first_name || userItem.id).charAt(0).toUpperCase()}
                       </div>
                       <div>
-                        <h3 className="font-semibold text-white text-lg">
+                        <h3 className="font-semibold text-black text-lg">
                           {userItem.first_name || userItem.id}
                         </h3>
-                        <p className="text-sm text-pink-200">
+                        <p className="text-sm text-pink-600">
                           {userItem.isInCall ? (
                             <span className="flex items-center">
                               <span className="w-2 h-2 bg-red-500 rounded-full mr-2 animate-pulse"></span>
@@ -577,14 +648,14 @@ export default function VideoPage() {
                     </div>
                     <button
                       onClick={() => callUser(userItem)}
-                      disabled={userItem.isInCall}
+                      disabled={userItem.isInCall || connectionStatus !== 'connected'}
                       className={`px-6 py-3 rounded-full font-semibold text-sm transition-all duration-300 transform hover:scale-105 ${
-                        userItem.isInCall
+                        userItem.isInCall || connectionStatus !== 'connected'
                           ? 'bg-gray-500 text-gray-300 cursor-not-allowed'
                           : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white shadow-lg'
                       }`}
                     >
-                      {userItem.isInCall ? '💤 Busy' : '📹 Video Call'}
+                      {userItem.isInCall ? '💤 Busy' : connectionStatus !== 'connected' ? '⏳ Wait...' : '📹 Video Call'}
                     </button>
                   </div>
                 </div>
