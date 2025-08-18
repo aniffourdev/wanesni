@@ -22,16 +22,16 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
   const cleanupRef = useRef(false);
   const initializingRef = useRef(false);
   const keepAliveRef = useRef(null);
-  const localStreamRef = useRef(null);
-  const remoteStreamRef = useRef(null);
+  const videoCheckTimeoutRef = useRef(null);
   
   const [isCallActive, setIsCallActive] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [remoteUserJoined, setRemoteUserJoined] = useState(false);
-  const [zegoVideoFound, setZegoVideoFound] = useState(false);
+  const [hasVideos, setHasVideos] = useState(false);
   const [connectionError, setConnectionError] = useState(null);
+  const [callStatus, setCallStatus] = useState('Initializing...');
 
   // Timer for call duration
   useEffect(() => {
@@ -60,6 +60,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
       }
 
       initializingRef.current = true;
+      setCallStatus('Connecting...');
 
       try {
         // Check if we're on HTTPS or localhost
@@ -102,12 +103,12 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
           setIsCallActive(true);
           if (users && users.length > 1) {
             setRemoteUserJoined(true);
-            // Delay to let videos initialize
-            setTimeout(() => {
-              if (mounted && !cleanupRef.current) {
-                moveZegoVideos();
-              }
-            }, 2000);
+            setCallStatus('Connected');
+            // Start safe video detection
+            startVideoDetection();
+          } else {
+            setCallStatus('Waiting for other user...');
+            startVideoDetection(); // Also detect local video
           }
         };
 
@@ -124,6 +125,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
           setConnectionError(`Call error: ${error.message || 'Connection failed'}`);
         };
 
+        // SAFER: Initialize ZegoCloud with minimal custom interference
         await zp.joinRoom({
           container: zegoContainerRef.current,
           scenario: {
@@ -141,8 +143,8 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
           showPinButton: false,
           turnOnMicrophoneWhenJoining: true,
           turnOnCameraWhenJoining: true,
-          showMyCameraToggleButton: false,
-          showMyMicrophoneToggleButton: false,
+          showMyCameraToggleButton: false, // Hide default buttons
+          showMyMicrophoneToggleButton: false, // Hide default buttons
           showAudioVideoSettingsButton: false,
           onJoinRoom: handleUserJoin,
           onLeaveRoom: handleCallEnd,
@@ -151,19 +153,16 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
             console.log('👋 Users left:', users);
             if (users && users.length <= 1) {
               setRemoteUserJoined(false);
-              // Show local video in main when alone
-              setTimeout(() => {
-                if (mounted && !cleanupRef.current) {
-                  moveZegoVideos();
-                }
-              }, 1000);
+              setCallStatus('User left');
+              clearVideoContainers();
+              setHasVideos(false);
             }
           },
           onReturnToHomeScreenClicked: handleCallEnd,
           onError: handleError,
-          // Audio/Video config
+          // Optimized settings for stability
           videoConfig: {
-            quality: 'high',
+            quality: 'medium', // Changed from 'high' for better stability
           },
           audioConfig: {
             quality: 'high',
@@ -173,28 +172,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
         });
 
         setIsCallActive(true);
-
-        // Initial video setup
-        setTimeout(() => {
-          if (mounted && !cleanupRef.current) {
-            moveZegoVideos();
-          }
-        }, 3000);
-
-        // Keep trying to setup videos
-        const videoSetupInterval = setInterval(() => {
-          if (mounted && !cleanupRef.current) {
-            moveZegoVideos();
-          } else {
-            clearInterval(videoSetupInterval);
-          }
-        }, 5000);
-
-        // Clear after 30 seconds
-        setTimeout(() => {
-          clearInterval(videoSetupInterval);
-        }, 30000);
-
+        setCallStatus('Call active');
         console.log('✅ Video call initialized');
         initializingRef.current = false;
 
@@ -205,138 +183,197 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
       }
     };
 
-    // FIXED: Better video detection and separation
-    const moveZegoVideos = () => {
-      try {
-        const zegoContainer = zegoContainerRef.current;
-        if (!zegoContainer) return;
+    // MUCH SAFER: Simple video detection without complex manipulation
+    const startVideoDetection = () => {
+      if (cleanupRef.current || !mounted) return;
 
-        // Find all video elements in the entire document
-        const allVideos = document.querySelectorAll('video');
-        console.log(`📹 Found ${allVideos.length} total videos in document`);
+      // Clear any existing timeout
+      if (videoCheckTimeoutRef.current) {
+        clearTimeout(videoCheckTimeoutRef.current);
+      }
 
-        // Clear existing videos first
-        if (mainVideoContainerRef.current) {
-          mainVideoContainerRef.current.innerHTML = '';
-        }
-        if (pipVideoContainerRef.current) {
-          pipVideoContainerRef.current.innerHTML = '';
-        }
+      const detectVideos = () => {
+        if (cleanupRef.current || !mounted) return;
 
-        let localVideo = null;
-        let remoteVideo = null;
-
-        // Process each video to determine if it's local or remote
-        allVideos.forEach((video, index) => {
-          if (video.srcObject && video.srcObject.getVideoTracks().length > 0) {
-            console.log(`🔍 Video ${index}:`, {
-              muted: video.muted,
-              autoplay: video.autoplay,
-              srcObjectId: video.srcObject.id,
-              videoTracks: video.srcObject.getVideoTracks().length,
-              audioTracks: video.srcObject.getAudioTracks().length,
-              parentElement: video.parentElement?.className
-            });
-
-            // Better local/remote detection
-            const stream = video.srcObject;
-            const videoTrack = stream.getVideoTracks()[0];
-            const audioTrack = stream.getAudioTracks()[0];
-
-            // Local video is usually:
-            // 1. Muted (to prevent feedback)
-            // 2. Has audio tracks that are from local microphone
-            // 3. Video track label often contains "user" or similar
-            const isLocalVideo = video.muted || 
-                               (videoTrack && videoTrack.label && videoTrack.label.includes('user')) ||
-                               (audioTrack && audioTrack.label && audioTrack.label.includes('microphone'));
-
-            if (isLocalVideo && !localVideo) {
-              localVideo = video;
-              localStreamRef.current = stream;
-              console.log('📹 Identified LOCAL video');
-            } else if (!isLocalVideo && !remoteVideo) {
-              remoteVideo = video;
-              remoteStreamRef.current = stream;
-              console.log('📹 Identified REMOTE video');
+        try {
+          // Simple video detection - no cloning or complex manipulation
+          const videos = Array.from(document.querySelectorAll('video')).filter(video => {
+            try {
+              return video.srcObject && 
+                     video.srcObject.getVideoTracks && 
+                     video.srcObject.getVideoTracks().length > 0 &&
+                     video.readyState >= 1; // HAVE_METADATA
+            } catch (e) {
+              return false;
             }
+          });
+
+          console.log(`📹 Found ${videos.length} videos`);
+
+          if (videos.length === 0) {
+            // Retry detection
+            videoCheckTimeoutRef.current = setTimeout(detectVideos, 2000);
+            return;
+          }
+
+          // SAFE: Just show/hide the custom layout based on video presence
+          setupVideoLayout(videos);
+
+        } catch (error) {
+          console.error('❌ Video detection error (safe):', error);
+          // Retry on error
+          videoCheckTimeoutRef.current = setTimeout(detectVideos, 3000);
+        }
+      };
+
+      // Start detection
+      detectVideos();
+    };
+
+    // SAFE: Minimal video layout setup - no cloning or manipulation
+    const setupVideoLayout = (videos) => {
+      try {
+        if (cleanupRef.current || !mounted) return;
+
+        let hasLocal = false;
+        let hasRemote = false;
+
+        // Simple detection without manipulation
+        videos.forEach(video => {
+          try {
+            if (video.muted) {
+              hasLocal = true;
+            } else {
+              hasRemote = true;
+            }
+          } catch (e) {
+            console.log('Video check error (safe):', e);
           }
         });
 
-        // Setup videos based on whether remote user is present
-        if (remoteUserJoined && remoteVideo) {
-          // Remote user joined - show remote in main, local in PiP
-          console.log('👥 Setting up videos: Remote in main, Local in PiP');
-          
-          // Remote video in main container (full screen)
-          const remoteClone = remoteVideo.cloneNode(true);
-          remoteClone.srcObject = remoteVideo.srcObject;
-          remoteClone.autoplay = true;
-          remoteClone.playsInline = true;
-          remoteClone.muted = false; // IMPORTANT: Don't mute remote video for audio
-          remoteClone.style.width = '100%';
-          remoteClone.style.height = '100%';
-          remoteClone.style.objectFit = 'cover';
-          remoteClone.style.transform = 'none'; // Don't mirror remote video
-          
-          if (mainVideoContainerRef.current) {
-            mainVideoContainerRef.current.appendChild(remoteClone);
-            remoteClone.play().catch(e => console.log('Remote video play error:', e));
-          }
+        console.log(`📺 Video layout: local=${hasLocal}, remote=${hasRemote}, remoteUserJoined=${remoteUserJoined}`);
 
-          // Local video in PiP (small box)
-          if (localVideo && pipVideoContainerRef.current) {
-            const localClone = localVideo.cloneNode(true);
-            localClone.srcObject = localVideo.srcObject;
-            localClone.autoplay = true;
-            localClone.playsInline = true;
-            localClone.muted = true; // Mute local video to prevent feedback
-            localClone.style.width = '100%';
-            localClone.style.height = '100%';
-            localClone.style.objectFit = 'cover';
-            localClone.style.transform = 'scaleX(-1)'; // Mirror local video
-            
-            pipVideoContainerRef.current.appendChild(localClone);
-            localClone.play().catch(e => console.log('Local video play error:', e));
-          }
-
-          setZegoVideoFound(true);
-
-        } else if (localVideo) {
-          // Only local user - show local in main container
-          console.log('👤 Setting up videos: Only local user');
-          
-          const localClone = localVideo.cloneNode(true);
-          localClone.srcObject = localVideo.srcObject;
-          localClone.autoplay = true;
-          localClone.playsInline = true;
-          localClone.muted = true; // Mute to prevent feedback
-          localClone.style.width = '100%';
-          localClone.style.height = '100%';
-          localClone.style.objectFit = 'cover';
-          localClone.style.transform = 'scaleX(-1)'; // Mirror local video
-          
-          if (mainVideoContainerRef.current) {
-            mainVideoContainerRef.current.appendChild(localClone);
-            localClone.play().catch(e => console.log('Local main video play error:', e));
-          }
-
-          // Also show in PiP for consistency
-          if (pipVideoContainerRef.current) {
-            const pipClone = localClone.cloneNode(true);
-            pipClone.srcObject = localVideo.srcObject;
-            pipClone.muted = true;
-            pipVideoContainerRef.current.appendChild(pipClone);
-            pipClone.play().catch(e => console.log('Local pip video play error:', e));
-          }
-
-          setZegoVideoFound(true);
-        }
-
-        console.log(`✅ Video setup complete - Local: ${localVideo ? 'found' : 'not found'}, Remote: ${remoteVideo ? 'found' : 'not found'}`);
+        // SAFE: Just create simple video displays instead of cloning
+        clearVideoContainers();
+        createVideoDisplays(videos);
+        setHasVideos(true);
 
       } catch (error) {
-        console.error('❌ Video move error:', error);
+        console.error('❌ Video layout error (safe):', error);
+      }
+    };
+
+    // SAFE: Create new video elements instead of cloning existing ones
+    const createVideoDisplays = (sourceVideos) => {
+      try {
+        if (cleanupRef.current || !sourceVideos.length) return;
+
+        let localStream = null;
+        let remoteStream = null;
+
+        // Extract streams safely
+        sourceVideos.forEach(video => {
+          try {
+            if (video.srcObject && video.muted && !localStream) {
+              localStream = video.srcObject;
+            } else if (video.srcObject && !video.muted && !remoteStream) {
+              remoteStream = video.srcObject;
+            }
+          } catch (e) {
+            console.log('Stream extraction error (safe):', e);
+          }
+        });
+
+        // Create displays based on available streams
+        if (remoteUserJoined && remoteStream && localStream) {
+          // Both users: remote main, local PiP
+          createVideoElement(remoteStream, mainVideoContainerRef.current, {
+            mirror: false,
+            muted: false,
+            type: 'remote'
+          });
+          
+          createVideoElement(localStream, pipVideoContainerRef.current, {
+            mirror: true,
+            muted: true,
+            type: 'local-pip'
+          });
+
+        } else if (localStream) {
+          // Only local: show in main
+          createVideoElement(localStream, mainVideoContainerRef.current, {
+            mirror: true,
+            muted: true,
+            type: 'local-main'
+          });
+
+          // Also in PiP for consistency
+          createVideoElement(localStream, pipVideoContainerRef.current, {
+            mirror: true,
+            muted: true,
+            type: 'local-pip-copy'
+          });
+        }
+
+      } catch (error) {
+        console.error('❌ Video display creation error (safe):', error);
+      }
+    };
+
+    // SAFE: Create fresh video elements instead of cloning
+    const createVideoElement = (stream, container, options = {}) => {
+      try {
+        if (!stream || !container || cleanupRef.current) return;
+
+        // Create completely new video element
+        const video = document.createElement('video');
+        video.srcObject = stream;
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = options.muted !== false;
+        
+        // Styling
+        video.style.cssText = `
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+          background-color: #000;
+          border-radius: inherit;
+          transform: ${options.mirror ? 'scaleX(-1)' : 'none'};
+        `;
+        
+        // Mobile support
+        video.setAttribute('webkit-playsinline', 'true');
+        video.setAttribute('playsinline', 'true');
+        
+        // Add to container
+        container.appendChild(video);
+        
+        // Play with error handling
+        video.play().catch(e => {
+          console.log(`Video play error for ${options.type} (safe):`, e.message);
+        });
+
+        console.log(`✅ Created ${options.type} video element safely`);
+
+      } catch (error) {
+        console.error(`❌ Error creating ${options.type} video element (safe):`, error);
+      }
+    };
+
+    // SAFE: Simple container clearing
+    const clearVideoContainers = () => {
+      try {
+        [mainVideoContainerRef.current, pipVideoContainerRef.current].forEach(container => {
+          if (container) {
+            // Remove all child elements safely
+            while (container.firstChild) {
+              container.removeChild(container.firstChild);
+            }
+          }
+        });
+      } catch (error) {
+        console.error('❌ Container clearing error (safe):', error);
       }
     };
 
@@ -347,102 +384,52 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
       cleanupRef.current = true;
       initializingRef.current = false;
       
+      // Cleanup timeouts
       if (keepAliveRef.current) {
         clearInterval(keepAliveRef.current);
         keepAliveRef.current = null;
       }
       
+      if (videoCheckTimeoutRef.current) {
+        clearTimeout(videoCheckTimeoutRef.current);
+        videoCheckTimeoutRef.current = null;
+      }
+      
+      // Cleanup ZegoCloud
       if (zpRef.current) {
-        setTimeout(() => {
-          try {
-            if (zpRef.current) {
-              zpRef.current.destroy();
-              zpRef.current = null;
-            }
-          } catch (error) {
-            console.log('Cleanup error:', error);
-          }
-        }, 100);
+        try {
+          zpRef.current.destroy();
+          zpRef.current = null;
+        } catch (error) {
+          console.log('Cleanup error (safe):', error);
+        }
       }
     };
   }, [roomId, userName]);
 
-  // FIXED: Direct ZegoCloud API calls for mute
+  // SAFE: Simple mute toggle
   const toggleMute = async () => {
-    if (!zpRef.current || cleanupRef.current) {
-      console.warn('❌ Cannot toggle mute - ZegoCloud not ready');
-      return;
-    }
+    if (!zpRef.current || cleanupRef.current) return;
 
     try {
-      const newMutedState = !isMuted;
-      console.log(`🎤 ${newMutedState ? 'Muting' : 'Unmuting'} microphone...`);
-      
-      // Direct ZegoCloud API call
-      if (newMutedState) {
-        await zpRef.current.muteMicrophone();
-      } else {
-        await zpRef.current.unmuteMicrophone();
-      }
-      
-      setIsMuted(newMutedState);
-      console.log(`✅ Microphone ${newMutedState ? 'muted' : 'unmuted'} successfully`);
-      
+      await zpRef.current.muteMicrophone(!isMuted);
+      setIsMuted(!isMuted);
+      console.log(`🎤 Microphone ${!isMuted ? 'muted' : 'unmuted'}`);
     } catch (error) {
-      console.error('❌ Error toggling microphone:', error);
-      
-      // Fallback: Try enableMicrophone
-      try {
-        await zpRef.current.enableMicrophone(!isMuted);
-        setIsMuted(!isMuted);
-        console.log('✅ Microphone toggled using fallback method');
-      } catch (fallbackError) {
-        console.error('❌ Fallback microphone toggle failed:', fallbackError);
-        alert('Could not toggle microphone. Please check permissions.');
-      }
+      console.error('❌ Mute toggle error (safe):', error);
     }
   };
 
-  // FIXED: Direct ZegoCloud API calls for camera
+  // SAFE: Simple camera toggle
   const toggleVideo = async () => {
-    if (!zpRef.current || cleanupRef.current) {
-      console.warn('❌ Cannot toggle video - ZegoCloud not ready');
-      return;
-    }
+    if (!zpRef.current || cleanupRef.current) return;
 
     try {
-      const newVideoState = !isVideoOn;
-      console.log(`📹 ${newVideoState ? 'Enabling' : 'Disabling'} camera...`);
-      
-      // Direct ZegoCloud API call
-      if (newVideoState) {
-        await zpRef.current.turnOnCamera();
-      } else {
-        await zpRef.current.turnOffCamera();
-      }
-      
-      setIsVideoOn(newVideoState);
-      console.log(`✅ Camera ${newVideoState ? 'enabled' : 'disabled'} successfully`);
-      
-      // Refresh video layout after camera toggle
-      setTimeout(() => {
-        if (!cleanupRef.current) {
-          moveZegoVideos();
-        }
-      }, 1000);
-      
+      await zpRef.current.muteVideoStream(!isVideoOn);
+      setIsVideoOn(!isVideoOn);
+      console.log(`📹 Camera ${!isVideoOn ? 'disabled' : 'enabled'}`);
     } catch (error) {
-      console.error('❌ Error toggling camera:', error);
-      
-      // Fallback: Try enableCamera
-      try {
-        await zpRef.current.enableCamera(!isVideoOn);
-        setIsVideoOn(!isVideoOn);
-        console.log('✅ Camera toggled using fallback method');
-      } catch (fallbackError) {
-        console.error('❌ Fallback camera toggle failed:', fallbackError);
-        alert('Could not toggle camera. Please check permissions.');
-      }
+      console.error('❌ Camera toggle error (safe):', error);
     }
   };
 
@@ -453,30 +440,30 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
     console.log('📴 Ending call...');
     
     setIsCallActive(false);
-    setZegoVideoFound(false);
     setRemoteUserJoined(false);
+    setHasVideos(false);
     
+    // Cleanup
     if (keepAliveRef.current) {
       clearInterval(keepAliveRef.current);
       keepAliveRef.current = null;
     }
     
+    if (videoCheckTimeoutRef.current) {
+      clearTimeout(videoCheckTimeoutRef.current);
+      videoCheckTimeoutRef.current = null;
+    }
+    
     if (zpRef.current) {
-      setTimeout(() => {
-        try {
-          if (zpRef.current) {
-            zpRef.current.destroy();
-            zpRef.current = null;
-          }
-        } catch (error) {
-          console.log('End call cleanup error:', error);
-        }
-        
-        if (onCallEnd) {
-          onCallEnd();
-        }
-      }, 300);
-    } else if (onCallEnd) {
+      try {
+        zpRef.current.destroy();
+        zpRef.current = null;
+      } catch (error) {
+        console.log('End call cleanup error (safe):', error);
+      }
+    }
+    
+    if (onCallEnd) {
       onCallEnd();
     }
   };
@@ -529,15 +516,15 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
       fontFamily: 'Arial, sans-serif',
       overflow: 'hidden'
     }}>
-      {/* ZegoCloud Container - Hidden */}
+      {/* ZegoCloud Container - Hidden but functional */}
       <div 
         ref={zegoContainerRef}
         style={{ 
           position: 'absolute',
           top: -10000,
           left: -10000,
-          width: "100px", 
-          height: "100px",
+          width: "300px", 
+          height: "200px",
           opacity: 0,
           pointerEvents: 'none',
           overflow: 'hidden'
@@ -574,33 +561,36 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
             <div style={{
               width: '12px',
               height: '12px',
-              backgroundColor: isCallActive ? '#4ade80' : '#ef4444',
+              backgroundColor: remoteUserJoined ? '#4ade80' : '#f59e0b',
               borderRadius: '50%',
               animation: 'pulse 2s infinite'
             }}></div>
-            <span style={{ fontWeight: 'bold' }}>{formatDuration(callDuration)}</span>
+            <span style={{ fontWeight: 'bold' }}>
+              {isCallActive ? formatDuration(callDuration) : callStatus}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Main video area - Full screen */}
+      {/* Main video area - Full screen for friend's video */}
       <div style={{
         flex: 1,
         position: 'relative',
         width: '100%',
         height: '100%'
       }}>
-        {/* Main Video Container - Full screen for remote user */}
+        {/* Main Video Container - Full screen */}
         <div 
           ref={mainVideoContainerRef}
           style={{
             width: '100%',
             height: '100%',
             backgroundColor: '#2a2a2a',
-            position: 'relative'
+            position: 'relative',
+            borderRadius: '0px'
           }}
         >
-          {!zegoVideoFound && (
+          {!hasVideos && (
             <div style={{
               position: 'absolute',
               top: '50%',
@@ -632,7 +622,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
           )}
         </div>
 
-        {/* Picture-in-Picture for Local Video */}
+        {/* Picture-in-Picture for Your Video (WhatsApp style) */}
         <div style={{
           position: 'absolute',
           bottom: '120px',
@@ -655,7 +645,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
               position: 'relative'
             }}
           >
-            {!zegoVideoFound && (
+            {!hasVideos && (
               <div style={{
                 position: 'absolute',
                 top: '50%',
@@ -684,31 +674,31 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
         </div>
       </div>
 
-      {/* Controls */}
+      {/* WhatsApp-style Controls */}
       <div style={{
         position: 'absolute',
         bottom: '30px',
         left: '50%',
         transform: 'translateX(-50%)',
         display: 'flex',
-        gap: '15px',
+        gap: '20px',
         zIndex: 1000,
         backgroundColor: 'rgba(0, 0, 0, 0.8)',
         borderRadius: '35px',
-        padding: '15px 20px',
+        padding: '15px 25px',
         backdropFilter: 'blur(10px)'
       }}>
         {/* Mute Button */}
         <button
           onClick={toggleMute}
           style={{
-            width: '50px',
-            height: '50px',
+            width: '55px',
+            height: '55px',
             borderRadius: '50%',
             border: 'none',
             backgroundColor: isMuted ? '#ef4444' : '#22c55e',
             color: '#fff',
-            fontSize: '20px',
+            fontSize: '22px',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
@@ -724,13 +714,13 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
         <button
           onClick={toggleVideo}
           style={{
-            width: '50px',
-            height: '50px',
+            width: '55px',
+            height: '55px',
             borderRadius: '50%',
             border: 'none',
             backgroundColor: !isVideoOn ? '#ef4444' : '#3b82f6',
             color: '#fff',
-            fontSize: '20px',
+            fontSize: '22px',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
@@ -746,13 +736,13 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
         <button
           onClick={endCall}
           style={{
-            width: '50px',
-            height: '50px',
+            width: '55px',
+            height: '55px',
             borderRadius: '50%',
             border: 'none',
             backgroundColor: '#ef4444',
             color: '#fff',
-            fontSize: '20px',
+            fontSize: '22px',
             cursor: 'pointer',
             display: 'flex',
             alignItems: 'center',
@@ -786,7 +776,7 @@ export default function CustomVideoCall({ roomId, userName, onCallEnd, otherUser
           <div style={{
             width: '6px',
             height: '6px',
-            backgroundColor: isCallActive ? '#4ade80' : '#f59e0b',
+            backgroundColor: remoteUserJoined ? '#4ade80' : '#f59e0b',
             borderRadius: '50%',
             animation: 'pulse 2s infinite'
           }}></div>
